@@ -11,7 +11,7 @@ Appli web installable (PWA), pensée pour un Pixel 6a (écran 412 px de large), 
 - Carte swisstopo avec chaque trajet en couleur et votre position.
 - « Quand partir ? » : compare les départs pour arriver avant une heure donnée (le plus tard, le plus court ou le moins chargé).
 - Trajets favoris, recalcul automatique chaque minute et quand vous vous déplacez.
-- Option voiture avec trafic en direct (clé TomTom gratuite à coller dans Réglages).
+- Option voiture sans clé (OSRM/OpenStreetMap, sans trafic) et lien vers Google Maps pour le trafic en direct ; clé TomTom facultative pour intégrer le trafic.
 
 ## Mettre l'appli en ligne (5 minutes, gratuit)
 

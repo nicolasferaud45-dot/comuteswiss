@@ -9,8 +9,8 @@
   var API = 'https://transport.opendata.ch/v1';
   var GEO = 'https://api3.geo.admin.ch/rest/services/ech/SearchServer';
   var TILES = {
-    plan: { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', attr: '© OpenStreetMap · © CARTO', sub: 'abcd', max: 19 },
-    swiss: { url: 'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg', attr: '© swisstopo', max: 18 }
+    plan: { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', attr: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', max: 19 },
+    swiss: { url: 'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg', attr: '© swisstopo', max: 18 }
   };
 
   // ---------------------------------------------------------------- stockage
@@ -294,10 +294,26 @@
   function deltaTxt(d) { return d === 0 ? 'même heure' : (d > 0 ? '+' + d : '−' + (-d)) + ' min'; }
 
   // ---------------------------------------------------------------- voiture
+  // Sans clé : OSRM (OpenStreetMap), gratuit, sans trafic
+  function fetchOsrm(from, to) {
+    var url = 'https://router.project-osrm.org/route/v1/driving/' + from.lon + ',' + from.lat + ';' + to.lon + ',' + to.lat + '?overview=simplified&geometries=geojson';
+    return getJSON(url, 12000).then(function (r) {
+      var rt = r.routes && r.routes[0]; if (!rt) return null;
+      return {
+        travel: Math.round(rt.duration), delay: 0, km: rt.distance / 1000, noTraffic: true,
+        points: ((rt.geometry && rt.geometry.coordinates) || []).map(function (c) { return [c[1], c[0]]; }),
+        fetchedAt: Date.now(), at: state.departAt
+      };
+    }).catch(function () { return { error: true }; });
+  }
+  function gmapsCar(from, to) {
+    return 'https://www.google.com/maps/dir/?api=1&origin=' + from.lat + ',' + from.lon + '&destination=' + to.lat + ',' + to.lon + '&travelmode=driving';
+  }
+
   function fetchCar(from, to) {
     var k = state.settings.tomtomKey;
     if (state.demo) return Promise.resolve(Demo.car(from, to));
-    if (!k) return Promise.resolve(null);
+    if (!k) return fetchOsrm(from, to);
     var url = 'https://api.tomtom.com/routing/1/calculateRoute/' + from.lat + ',' + from.lon + ':' + to.lat + ',' + to.lon +
       '/json?traffic=true&travelMode=car&routeRepresentation=polyline' + (state.departAt && state.departAt > Date.now() ? '&departAt=' + encodeURIComponent(new Date(state.departAt).toISOString()) : '') + '&key=' + encodeURIComponent(k);
     return getJSON(url, 12000).then(function (r) {
@@ -465,15 +481,18 @@
   }
 
   function carHtml(main) {
-    var c = state.car;
-    if (!c) return state.settings.tomtomKey ? '' : '<button type="button" class="card alt car-card" data-act="settings"><span class="alt-main"><span class="alt-title">Et en voiture ?</span><span class="alt-sub">Ajoutez une clé TomTom gratuite dans Réglages pour comparer avec le trafic en direct</span></span></button>';
-    if (c.error) return '<div class="card car-card small muted">Trafic voiture indisponible pour le moment.</div>';
+    var c = state.car, r = state.result;
+    var gl = r && r.from && r.to ? '<a class="gmaps car-link" href="' + esc(gmapsCar(r.from, r.to)) + '" target="_blank" rel="noopener">Voir le trafic en direct dans Google Maps ↗</a>' : '';
+    if (!c) return '';
+    if (c.error) return '<div class="card car-card small muted">Itinéraire voiture indisponible pour le moment.</div>' + gl;
     var arrive = (c.at || c.fetchedAt) + (c.travel + state.settings.parking * 60) * 1000;
     var d = mins(arrive - main.arrive), jam = Math.round(c.delay / 60);
+    var traffic = c.noTraffic ? 'Sans trafic (OpenStreetMap) : comptez plus aux heures de pointe'
+      : (jam ? 'dont ' + jam + ' min de bouchons · ' : 'Trafic fluide · ') + (c.at ? 'trafic prévu pour ' + hm(c.at) : 'trafic ' + ago(c.fetchedAt));
     return '<button type="button" class="card alt car-card" data-act="map"><span class="alt-main"><span class="alt-title">En voiture</span>' +
-      '<span class="alt-sub ' + (jam >= 5 ? 'delta-bad' : '') + '">' + Math.round(c.travel / 60) + ' min de route' + (jam ? ' dont ' + jam + ' min de bouchons' : ', trafic fluide') + ' + ' + state.settings.parking + ' min parking</span>' +
-      '<span class="alt-sub">' + (c.at ? 'Trafic prévu pour ' + hm(c.at) : 'Trafic ' + ago(c.fetchedAt)) + ' · ' + c.km.toFixed(0) + ' km</span></span>' +
-      '<span class="alt-time"><b>' + hm(arrive) + '</b><span class="dur">' + durTxt(mins(arrive - (c.at || c.fetchedAt))) + '</span><span>' + deltaTxt(d) + '</span></span></button>';
+      '<span class="alt-sub">' + Math.round(c.travel / 60) + ' min de route + ' + state.settings.parking + ' min parking · ' + c.km.toFixed(0) + ' km</span>' +
+      '<span class="alt-sub ' + (jam >= 5 ? 'delta-bad' : '') + '">' + traffic + '</span></span>' +
+      '<span class="alt-time"><b>' + (c.noTraffic ? '≈ ' : '') + hm(arrive) + '</b><span class="dur">' + durTxt(mins(arrive - (c.at || c.fetchedAt))) + '</span><span>' + deltaTxt(d) + '</span></span></button>' + gl;
   }
 
   function renderOd() {
@@ -584,7 +603,7 @@
     var k = state.settings.mapStyle === 'swiss' ? 'swiss' : 'plan', t = TILES[k];
     var dark = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches;
     if (tileLayer) map.removeLayer(tileLayer);
-    tileLayer = L.tileLayer(k === 'plan' && dark ? t.dark : t.url, { maxZoom: t.max, subdomains: t.sub || 'abc', attribution: t.attr, detectRetina: false }).addTo(map);
+    tileLayer = L.tileLayer(t.url, { maxZoom: t.max, attribution: t.attr, className: k === 'plan' && dark ? 'tiles-dark' : '' }).addTo(map);
   }
   function gmapsUrl(t, r, car) {
     var o = r.from, d = r.to;
