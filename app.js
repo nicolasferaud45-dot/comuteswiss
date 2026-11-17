@@ -19,7 +19,7 @@
     set: function (k, v) { try { localStorage.setItem('trajet.' + k, JSON.stringify(v)); } catch (e) { /* stockage indisponible */ } }
   };
 
-  var DEFAULT_SETTINGS = { walkMax: 10, walkSpeed: 80, minTransfer: 3, parking: 8, tomtomKey: '' };
+  var DEFAULT_SETTINGS = { walkMax: 10, walkSpeed: 80, minTransfer: 3, parking: 8, tomtomKey: '', retStart: 16, retEnd: 19 };
   var GPS_PLACE = { kind: 'gps', label: 'Ma position' };
   var DEFAULT_FAVS = [
     { id: 'f1', name: 'Vers Fourmi', from: GPS_PLACE, to: { kind: 'query', label: 'Lausanne, Fourmi' } },
@@ -250,6 +250,7 @@
       if (t.minSlack != null && t.minSlack < s.minTransfer) { t.penalty += 6; t.reasons.push('Correspondance de ' + t.minSlack + ' min, risquée'); }
       if (t.capacity === 3) { t.penalty += 3; t.reasons.push('Très chargé'); }
       if (t.maxDelay >= 3) { t.reasons.push('Retard de ' + t.maxDelay + ' min'); }
+      if (t.rain && t.rain.wet >= 2) { t.penalty += t.rain.wet * 0.5; }
       t.score = t.arrive / 60000 + t.penalty;
     });
     var live = trips.filter(function (t) { return !t.dead; }).sort(function (a, b) { return a.score - b.score || b.leave - a.leave; });
@@ -326,6 +327,114 @@
     }).catch(function () { return { error: true }; });
   }
 
+
+  // ---------------------------------------------------------------- météo (discrète)
+  // Open-Meteo : pluie au quart d'heure (ICON-D2 / AROME) + probabilité horaire. Gratuit, sans clé.
+  var wxCache = null;
+  function getWeather(from, to) {
+    if (state.demo) return Promise.resolve(Demo.weather(from, to));
+    var key = [from.lat, from.lon, to.lat, to.lon].map(function (v) { return v.toFixed(2); }).join(',');
+    if (wxCache && wxCache.key === key && Date.now() - wxCache.data.fetchedAt < 15 * 60000) return Promise.resolve(wxCache.data);
+    var url = 'https://api.open-meteo.com/v1/forecast?latitude=' + from.lat.toFixed(4) + ',' + to.lat.toFixed(4) + '&longitude=' + from.lon.toFixed(4) + ',' + to.lon.toFixed(4) +
+      '&minutely_15=precipitation&hourly=precipitation,precipitation_probability&timeformat=unixtime&timezone=Europe%2FZurich&forecast_days=3';
+    return getJSON(url, 6000).then(function (r) {
+      var arr = Array.isArray(r) ? r : [r, r];
+      var pt = function (x) { return {
+        q: { t: x.minutely_15.time.map(function (v) { return v * 1000; }), p: x.minutely_15.precipitation },
+        h: { t: x.hourly.time.map(function (v) { return v * 1000; }), p: x.hourly.precipitation, pr: x.hourly.precipitation_probability }
+      }; };
+      var data = { from: pt(arr[0]), to: pt(arr[1] || arr[0]), fetchedAt: Date.now() };
+      wxCache = { key: key, data: data };
+      return data;
+    }).catch(function () { return null; });
+  }
+  // Minutes sous la pluie (≥ 0,4 mm/h) entre a et b, et intensité max (mm/h)
+  function rainBetween(w, a, b) {
+    var wet = 0, max = 0;
+    if (!w || b <= a) return { wet: 0, max: 0 };
+    for (var i = 0; i < w.q.t.length; i++) {
+      var end = w.q.t[i], start = end - 15 * 60000;   // valeur = cumul des 15 min précédentes
+      var ov = Math.min(b, end) - Math.max(a, start);
+      if (ov <= 0) continue;
+      var mmh = (w.q.p[i] || 0) * 4;
+      if (mmh >= 0.4) { wet += ov / 60000; max = Math.max(max, mmh); }
+    }
+    return { wet: Math.round(wet), max: max };
+  }
+  // Les marches d'un trajet : [début, fin, lieu]
+  function walksOf(t, f, d) {
+    var out = [], v = t.veh, first = v[0], last = v[v.length - 1];
+    if (first.dep - t.leave >= 60000) out.push([t.leave, first.dep, 'from']);
+    for (var i = 1; i < v.length; i++) {
+      var hasWalk = t.legs.some(function (l) { return l.type === 'walk' && l.dep >= v[i - 1].arr - 60000 && l.arr <= v[i].dep + 60000; });
+      if (hasWalk) {
+        var p = v[i].from;
+        var where = p && f && d && dist(p, f) < dist(p, d) ? 'from' : 'to';
+        t.legs.forEach(function (l) { if (l.type === 'walk' && l.dep >= v[i - 1].arr - 60000 && l.arr <= v[i].dep + 60000) out.push([l.dep, l.dep + l.min * 60000, where]); });
+      }
+    }
+    if (t.arrive - last.arr >= 60000) out.push([last.arr, t.arrive, 'to']);
+    return out;
+  }
+  function tripRain(t, wx, f, d) {
+    if (!wx) return null;
+    var wet = 0, max = 0, where = {};
+    walksOf(t, f, d).forEach(function (w) {
+      var r = rainBetween(wx[w[2]], w[0], w[1]);
+      if (r.wet) { wet += r.wet; max = Math.max(max, r.max); where[w[2]] = 1; }
+    });
+    return { wet: wet, max: max, where: Object.keys(where) };
+  }
+  // Verdict parapluie sur une fenêtre horaire (deux lieux)
+  function umbrellaFor(wx, a, b) {
+    var best = { level: 0, from: null, to: null };
+    ['from', 'to'].forEach(function (k) {
+      var h = wx[k].h;
+      for (var i = 0; i < h.t.length; i++) {
+        var s0 = h.t[i] - 3600000, e0 = h.t[i];   // précipitation horaire = heure précédente
+        if (e0 <= a || s0 >= b) continue;
+        var pr = h.pr[i] || 0, mm = h.p[i] || 0;
+        var lvl = pr >= 60 && mm >= 0.3 ? 2 : pr >= 30 && mm >= 0.1 ? 1 : 0;
+        if (lvl) { if (lvl > best.level) best.level = lvl; if (!best.from || s0 < best.from) best.from = s0; if (!best.to || e0 > best.to) best.to = e0; }
+      }
+    });
+    return best;
+  }
+  function umbrellaHtml(main) {
+    var r = state.result, wx = r && r.wx; if (!wx) return '';
+    var s = state.settings, day = new Date(main.leave);
+    var rs = new Date(day); rs.setHours(s.retStart, 0, 0, 0);
+    var re = new Date(day); re.setHours(s.retEnd, 0, 0, 0);
+    var go = umbrellaFor(wx, main.leave, main.arrive + 30 * 60000);
+    var back = re.getTime() > main.arrive ? umbrellaFor(wx, Math.max(rs.getTime(), main.arrive), re.getTime()) : { level: 0 };
+    var lvl = Math.max(go.level, back.level);
+    var hh = function (x) { return new Date(x).getHours() + 'h'; };
+    var detail;
+    var hasBack = re.getTime() > main.arrive;
+    if (!lvl) detail = hasBack ? 'pas de pluie prévue à l\'aller ni au retour (' + s.retStart + 'h–' + s.retEnd + 'h)' : 'pas de pluie prévue sur ce trajet';
+    else {
+      var parts = [];
+      if (go.level) parts.push('à l\'aller');
+      if (back.level) parts.push('au retour ' + hh(back.from) + '–' + hh(back.to));
+      detail = (lvl === 2 ? 'pluie probable ' : 'risque d\'averse ') + parts.join(' et ');
+    }
+    return '<p class="wx-line"><span aria-hidden="true">' + (lvl ? '☂' : '☀') + '</span> <b>Parapluie : ' + (lvl === 2 ? 'oui' : lvl === 1 ? 'peut-être' : 'non') + '</b> · ' + detail + '</p>';
+  }
+  function rainAdvice(main, r) {
+    if (!main.rain || main.rain.wet < 2) return '';
+    var lieu = main.rain.where.length > 1 ? 'au départ et à l\'arrivée' : main.rain.where[0] === 'from' ? 'au départ' : 'à l\'arrivée';
+    var h = '<p class="wx-line wx-rain"><span aria-hidden="true">💧</span> ' + main.rain.wet + ' min à pied sous la pluie ' + lieu + ' (≈ ' + main.rain.max.toFixed(1).replace('.', ',') + ' mm/h)';
+    var pool = r.proposed.concat(r.rejected).filter(function (t) { return !t.dead && t !== main && t.rain && t.rain.wet <= main.rain.wet - 2 && t.arrive - main.arrive <= 15 * 60000 && t.leave > Date.now() - 45000; });
+    pool.sort(function (a, b) { return (a.rain.wet - b.rain.wet) * 2 + mins(a.arrive - b.arrive); });
+    var alt = pool[0];
+    if (alt) {
+      var dl = mins(alt.leave - main.leave), da = mins(alt.arrive - main.arrive);
+      h += '. <button type="button" class="link-btn" data-pick="' + esc(alt.key) + '">' + (dl > 0 ? 'Attendez ' + dl + ' min' : dl < 0 ? 'Partez ' + (-dl) + ' min plus tôt' : 'Autre parcours') + ' (départ ' + hm(alt.leave) + ')</button> : ' +
+        (alt.rain.wet ? alt.rain.wet + ' min sous la pluie' : 'au sec') + ', arrivée ' + (da > 0 ? da + ' min plus tard' : da < 0 ? (-da) + ' min plus tôt' : 'à la même heure');
+    }
+    return h + '</p>';
+  }
+
   // ---------------------------------------------------------------- calcul principal
   var running = 0;
   function compute(opts) {
@@ -337,9 +446,11 @@
     if (!opts.silent) render();
     Promise.all([resolvePlace(state.from), resolvePlace(state.to)]).then(function (pl) {
       var from = pl[0], to = pl[1];
-      return gather(from, to, baseTime(), false, 4, 3, 4).then(function (g) {
+      return Promise.all([gather(from, to, baseTime(), false, 4, 3, 4), getWeather(from, to)]).then(function (res) {
+        var g = res[0], wx = res[1];
         if (id !== running) return;
-        var r = rank(g.trips);
+        g.trips.forEach(function (t) { t.rain = tripRain(t, wx, from, to); });
+        var r = rank(g.trips); r.wx = wx;
         state.result = Object.assign(r, { fetchedAt: Date.now(), at: state.departAt, origins: g.origins, dests: g.dests, from: from, to: to, demo: state.demo });
         state.loading = false;
         var y = $('#screens').scrollTop;
@@ -432,6 +543,7 @@
     if (state.from.kind === 'gps' && state.gps) tags.push([state.gps.acc <= 50 ? 'tag-good' : 'tag-warn', 'GPS ±' + state.gps.acc + ' m · ' + ago(state.gps.ts)]);
     var c = capLabel(t.capacity);
     tags.push(['tag-grey', c ? 'Affluence ' + c + ' (prévision)' : 'Affluence inconnue']);
+    if (r.wx) tags.push([Date.now() - r.wx.fetchedAt < 3 * 3600000 ? 'tag-grey' : 'tag-warn', 'Météo Open-Meteo · ' + hm(r.wx.fetchedAt)]);
     if (r.demo) tags.push(['tag-warn', 'Données de démonstration']);
     return '<div class="based"><span class="small muted">Décision basée sur</span><div class="tags">' +
       tags.map(function (x) { return '<span class="tag ' + x[0] + '"><span class="dot"></span>' + esc(x[1]) + '</span>'; }).join('') + '</div></div>';
@@ -460,9 +572,11 @@
       '<div class="row-between"><span class="eyebrow">' + (main === r.best ? 'Meilleur trajet' : 'Votre choix') + '</span><span class="pill ' + leavePill[0] + '">' + leavePill[1] + '</span></div>' +
       '<div class="stats"><div><span class="stat-label">Départ</span><b>' + hm(main.leave) + '</b></div><div><span class="stat-label">Durée totale</span><b>' + durTxt(main.duration) + '</b></div><div><span class="stat-label">Arrivée</span><b>' + hm(main.arrive) + '</b></div></div>' +
       legsHtml(main, true) +
+      rainAdvice(main, r) +
       (main.reasons.length ? '<div class="tags">' + main.reasons.map(function (x) { return '<span class="tag tag-warn"><span class="dot"></span>' + esc(x) + '</span>'; }).join('') + '</div>' : '') +
       (state.showDetail ? timelineHtml(main) : '') +
       '<button type="button" class="btn btn-soft btn-small" data-act="detail" aria-expanded="' + state.showDetail + '">' + (state.showDetail ? 'Masquer le détail' : 'Voir le détail du trajet') + '</button>' +
+      umbrellaHtml(main) +
       basedOn(main) + '</section>';
 
     var alts = r.proposed.filter(function (t) { return t !== main; });
@@ -471,7 +585,7 @@
     alts.forEach(function (t) {
       var d = mins(t.arrive - main.arrive);
       h += '<button type="button" class="card alt" data-key="' + esc(t.key) + '"><span class="alt-main"><span class="alt-title">' + esc(tripTitle(t)) + '</span>' + legsHtml(t, false) +
-        '<span class="alt-sub">' + (t.next ? 'Même parcours, plus tard · ' : '') + 'Départ ' + hm(t.leave) + (t.reasons.length ? ' · ' + esc(t.reasons[0]) : '') + '</span></span>' +
+        '<span class="alt-sub">' + (t.next ? 'Même parcours, plus tard · ' : '') + 'Départ ' + hm(t.leave) + (t.rain && t.rain.wet >= 2 ? ' · 💧 ' + t.rain.wet + ' min sous la pluie' : '') + (t.reasons.length ? ' · ' + esc(t.reasons[0]) : '') + '</span></span>' +
         '<span class="alt-time"><b>' + hm(t.arrive) + '</b><span class="dur">' + durTxt(t.duration) + '</span><span>' + deltaTxt(d) + '</span></span></button>';
     });
     h += carHtml(main);
@@ -749,6 +863,7 @@
     $('#walkMax-out').textContent = s.walkMax + ' min';
     $('#minTransfer-out').textContent = s.minTransfer + ' min';
     $('#parking-out').textContent = s.parking + ' min';
+    $('#retStart-out').textContent = s.retStart + 'h'; $('#retEnd-out').textContent = s.retEnd + 'h';
     $('#walkSpeed').value = String(s.walkSpeed);
     $('#tomtomKey').value = s.tomtomKey || '';
     var h = '';
@@ -831,6 +946,10 @@
         store.set('favs', state.favs); renderFavs(); toast('Favori enregistré. Renommez-le dans Réglages.');
       }
     });
+    $('#trip-results').addEventListener('click', function (e) {
+      var b = e.target.closest('.wx-line [data-pick]'); if (!b) return;
+      state.selectedKey = b.dataset.pick; render(); toast('Trajet au sec choisi.');
+    });
     $('#rejected-body').addEventListener('click', function (e) {
       var b = e.target.closest('[data-pick]'); if (!b) return;
       state.selectedKey = b.dataset.pick; state.showDetail = true; closeSheet('#rejected-sheet'); render(); toast('Trajet choisi.');
@@ -864,9 +983,9 @@
     });
 
     $$('[data-step]').forEach(function (b) { b.addEventListener('click', function () {
-      var k = b.dataset.step, lim = { walkMax: [0, 30], minTransfer: [1, 10], parking: [0, 40] }[k];
+      var k = b.dataset.step, lim = { walkMax: [0, 30], minTransfer: [1, 10], parking: [0, 40], retStart: [5, state.settings.retEnd - 1], retEnd: [state.settings.retStart + 1, 23] }[k];
       state.settings[k] = Math.min(lim[1], Math.max(lim[0], state.settings[k] + (+b.dataset.delta)));
-      saveSettings(); renderSettings(); if (k !== 'parking') state.result = null;
+      saveSettings(); renderSettings(); if (k !== 'parking' && k !== 'retStart' && k !== 'retEnd') state.result = null;
     }); });
     $('#walkSpeed').addEventListener('change', function (e) { state.settings.walkSpeed = +e.target.value; saveSettings(); state.result = null; });
     $('#tomtomKey').addEventListener('change', function (e) { state.settings.tomtomKey = e.target.value.trim(); saveSettings(); state.car = null; toast(state.settings.tomtomKey ? 'Clé enregistrée.' : 'Clé retirée.'); });
@@ -960,7 +1079,21 @@
       return { travel: Math.round(km / 75 * 3600) + 14 * 60, delay: 14 * 60, km: km, fetchedAt: Date.now(), at: state.departAt,
         points: [[f.lat, f.lon], [46.44, 6.30], [46.49, 6.42], [46.52, 6.53], [46.545, 6.59], [t.lat, t.lon]] };
     }
-    return { connections: connections, nearby: nearby, search: search, car: car, home: home,
+    function weather(f, t) {
+      // Démo : averse à Lausanne dans ~60–75 min, pluie à Gland 17h–19h
+      var now = Date.now(), q0 = Math.floor(now / 900000) * 900000;
+      var mk = function (rainy) {
+        var qt = [], qp = [], ht = [], hp = [], hpr = [];
+        for (var i = -4; i < 200; i++) { var tt = q0 + i * 900000; qt.push(tt); qp.push(rainy(tt) ? 0.5 : 0); }
+        var h0 = Math.floor(now / 3600000) * 3600000;
+        for (var j = -2; j < 48; j++) { var th = h0 + j * 3600000, hr = new Date(th - 1).getHours(); var wet = rainy(th - 1) || (hr >= 17 && hr < 19); ht.push(th); hp.push(wet ? 1.2 : 0); hpr.push(wet ? 70 : 10); }
+        return { q: { t: qt, p: qp }, h: { t: ht, p: hp, pr: hpr } };
+      };
+      var lsn = function (x) { return x > now + 60 * 60000 && x <= now + 75 * 60000; };
+      var gl = function (x) { var h = new Date(x).getHours(); return h >= 17 && h < 19; };
+      return { from: mk(gl), to: mk(function (x) { return lsn(x) || gl(x); }), fetchedAt: now };
+    }
+    return { connections: connections, nearby: nearby, search: search, car: car, home: home, weather: weather,
       fourmi: { kind: 'station', id: S.fourmi.id, label: S.fourmi.name, lat: S.fourmi.lat, lon: S.fourmi.lon } };
   })();
 

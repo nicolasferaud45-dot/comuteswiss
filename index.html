@@ -118,6 +118,18 @@
         </div>
       </div>
 
+      <h2 class="section-title">Météo</h2>
+      <div class="card stack">
+        <div class="row-between">
+          <span><span class="strong">Retour : à partir de</span><br><span class="muted small">Pour le conseil parapluie</span></span>
+          <span class="stepper"><button type="button" data-step="retStart" data-delta="-1" aria-label="Plus tôt">−</button><output id="retStart-out"></output><button type="button" data-step="retStart" data-delta="1" aria-label="Plus tard">+</button></span>
+        </div>
+        <div class="row-between">
+          <span><span class="strong">Retour : jusqu'à</span></span>
+          <span class="stepper"><button type="button" data-step="retEnd" data-delta="-1" aria-label="Plus tôt">−</button><output id="retEnd-out"></output><button type="button" data-step="retEnd" data-delta="1" aria-label="Plus tard">+</button></span>
+        </div>
+      </div>
+
       <h2 class="section-title">Comparaison voiture</h2>
       <div class="card stack">
         <label for="tomtomKey"><span class="strong">Clé TomTom (facultative)</span><br><span class="muted small">Sans clé, le temps en voiture vient d'OpenStreetMap, sans trafic. Avec une clé gratuite (developer.tomtom.com), il tient compte des bouchons.</span></label>
@@ -129,7 +141,7 @@
       </div>
 
       <h2 class="section-title">Sources des données</h2>
-      <p class="muted small">Horaires et retards : transport.opendata.ch · Adresses : swisstopo (geo.admin.ch) · Carte : OpenStreetMap · Voiture : OSRM / OpenStreetMap (TomTom si clé). Les données restent sur ce téléphone.</p>
+      <p class="muted small">Horaires et retards : transport.opendata.ch · Adresses : swisstopo (geo.admin.ch) · Carte : OpenStreetMap · Voiture : OSRM / OpenStreetMap (TomTom si clé) · Météo : Open-Meteo (modèles ICON-D2, AROME, MétéoSuisse). Les données restent sur ce téléphone.</p>
     </section>
   </main>
 
