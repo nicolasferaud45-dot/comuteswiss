@@ -8,7 +8,10 @@
 
   var API = 'https://transport.opendata.ch/v1';
   var GEO = 'https://api3.geo.admin.ch/rest/services/ech/SearchServer';
-  var TILE = 'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg';
+  var TILES = {
+    plan: { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', attr: '© OpenStreetMap · © CARTO', sub: 'abcd', max: 19 },
+    swiss: { url: 'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg', attr: '© swisstopo', max: 18 }
+  };
 
   // ---------------------------------------------------------------- stockage
   var store = {
@@ -155,7 +158,7 @@
     if (t === 'bus') return num && num.length <= 4 ? num : 'Bus';
     return num && num.length <= 3 ? cat + num : cat;
   }
-  var COLORS = { train: '#14181F', bus: '#4B5563', metro: '#C2410C', tram: '#0E7C66', other: '#5B3FB0', walk: '#8A919C', car: '#8A919C' };
+  var COLORS = { train: '#D52B1E', bus: '#7048E8', metro: '#F08C00', tram: '#0E9F7E', other: '#5B3FB0', walk: '#5C6370', car: '#2348C9' };
 
   function parseConnection(c, o, d) {
     var legs = [];
@@ -576,47 +579,76 @@
 
   // ---------------------------------------------------------------- carte
   var map = null, mapLayer = null, mapSel = null;
+  var tileLayer = null, mapZoom = 'all';
+  function setTiles() {
+    var k = state.settings.mapStyle === 'swiss' ? 'swiss' : 'plan', t = TILES[k];
+    var dark = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches;
+    if (tileLayer) map.removeLayer(tileLayer);
+    tileLayer = L.tileLayer(k === 'plan' && dark ? t.dark : t.url, { maxZoom: t.max, subdomains: t.sub || 'abc', attribution: t.attr, detectRetina: false }).addTo(map);
+  }
+  function gmapsUrl(t, r, car) {
+    var o = r.from, d = r.to;
+    return 'https://www.google.com/maps/dir/?api=1&origin=' + o.lat + ',' + o.lon + '&destination=' + d.lat + ',' + d.lon + '&travelmode=' + (car ? 'driving' : 'transit');
+  }
   function renderMap() {
     if (typeof L === 'undefined') { $('#map').innerHTML = '<p class="empty">Carte indisponible.</p>'; return; }
     if (!map) {
       map = L.map('map', { zoomControl: false, attributionControl: true }).setView([46.47, 6.45], 10);
-      L.tileLayer(TILE, { maxZoom: 18, attribution: '© swisstopo' }).addTo(map);
+      setTiles();
       L.control.zoom({ position: 'topright' }).addTo(map);
       mapLayer = L.layerGroup().addTo(map);
     }
     setTimeout(function () { map.invalidateSize(); }, 50);
     mapLayer.clearLayers();
-    var r = state.result, bounds = [];
+    var r = state.result, all = [], start = [], end = [];
+    var tools = $('#map-tools');
     if (state.gps) {
-      L.marker([state.gps.lat, state.gps.lon], { icon: L.divIcon({ className: '', html: '<div class="me-dot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }), title: 'Vous' }).addTo(mapLayer);
+      L.marker([state.gps.lat, state.gps.lon], { icon: L.divIcon({ className: '', html: '<div class="me-dot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }), title: 'Vous', zIndexOffset: 1000 }).addTo(mapLayer);
       L.circle([state.gps.lat, state.gps.lon], { radius: state.gps.acc, color: '#2348C9', weight: 1, fillOpacity: 0.08 }).addTo(mapLayer);
-      bounds.push([state.gps.lat, state.gps.lon]);
     }
     var sheet = $('#map-sheet');
-    if (!r || !r.best) { sheet.innerHTML = '<p class="muted small" style="margin:4px">Choisissez une destination dans l\'onglet Trajet pour voir les itinéraires.</p>'; if (bounds.length) map.setView(bounds[0], 14); return; }
+    if (!r || !r.best) { tools.hidden = true; sheet.innerHTML = '<p class="muted small" style="margin:4px">Choisissez une destination dans l\'onglet Trajet pour voir les itinéraires.</p>'; if (state.gps) map.setView([state.gps.lat, state.gps.lon], 14); return; }
+    tools.hidden = false;
+    tools.querySelector('[data-style]').textContent = state.settings.mapStyle === 'swiss' ? 'Plan' : 'Swisstopo';
     var sel = mapSel || state.selectedKey || r.best.key;
     var list = r.proposed.slice();
     var chosen = r.rejected.filter(function (t) { return t.key === sel; })[0]; if (chosen) list.push(chosen);
     var drawTrip = function (t, on) {
-      var op = on ? 1 : 0.25, w = on ? 6 : 4;
-      var line = function (pts, color, dash) { if (pts.length < 2) return; L.polyline(pts, { color: color, weight: w, opacity: op, dashArray: dash || null, lineCap: 'round' }).addTo(mapLayer); if (on) pts.forEach(function (p) { bounds.push(p); }); };
+      // la plus longue étape (souvent le train) sépare « départ » et « arrivée »
+      var main = null; t.veh.forEach(function (l) { if (!main || l.arr - l.dep > main.arr - main.dep) main = l; });
+      var phase = 'start';
+      var line = function (pts, color, dash) {
+        if (pts.length < 2) return;
+        if (on) L.polyline(pts, { color: '#fff', weight: 10, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }).addTo(mapLayer);
+        L.polyline(pts, { color: color, weight: on ? 6 : 4, opacity: on ? 1 : 0.35, dashArray: dash || null, lineCap: 'round', lineJoin: 'round' }).addTo(mapLayer);
+        if (on) pts.forEach(function (p) { all.push(p); if (phase === 'start') start.push(p); else if (phase === 'end') end.push(p); });
+      };
       var from = r.from, to = r.to;
-      if (t.origin.walk) line([[from.lat, from.lon], [t.origin.lat, t.origin.lon]], COLORS.walk, '4 8');
+      if (t.origin.walk) line([[from.lat, from.lon], [t.origin.lat, t.origin.lon]], COLORS.walk, '2 9');
       t.legs.forEach(function (l) {
-        if (l.type === 'walk') { if (l.from && l.to) line([[l.from.lat, l.from.lon], [l.to.lat, l.to.lon]], COLORS.walk, '4 8'); return; }
-        line(l.path.map(function (p) { return [p.lat, p.lon]; }), COLORS[l.type]);
-        if (on && l.from) L.circleMarker([l.from.lat, l.from.lon], { radius: 5, color: COLORS[l.type], weight: 3, fillColor: '#fff', fillOpacity: 1 }).bindTooltip(esc(l.fromName) + ' ' + hm(l.dep)).addTo(mapLayer);
+        if (l === main) {
+          phase = 'main';
+          if (on && l.from) start.push([l.from.lat, l.from.lon]);
+        }
+        if (l.type === 'walk') { if (l.from && l.to) line([[l.from.lat, l.from.lon], [l.to.lat, l.to.lon]], COLORS.walk, '2 9'); }
+        else {
+          line(l.path.map(function (p) { return [p.lat, p.lon]; }), COLORS[l.type]);
+          if (on && l.from) L.circleMarker([l.from.lat, l.from.lon], { radius: 6, color: COLORS[l.type], weight: 3, fillColor: '#fff', fillOpacity: 1 }).bindTooltip(esc(l.label) + ' · ' + esc(l.fromName) + ' ' + hm(l.dep), { direction: 'top' }).addTo(mapLayer);
+        }
+        if (l === main) { phase = 'end'; if (on && l.dest) end.push([l.dest.lat, l.dest.lon]); }
       });
-      if (t.dest.walk) line([[t.dest.lat, t.dest.lon], [to.lat, to.lon]], COLORS.walk, '4 8');
+      if (t.dest.walk) line([[t.dest.lat, t.dest.lon], [to.lat, to.lon]], COLORS.walk, '2 9');
+      if (on) { start.unshift([from.lat, from.lon]); end.push([to.lat, to.lon]); }
     };
     list.forEach(function (t) { if (t.key !== sel) drawTrip(t, false); });
-    if (state.car && state.car.points && state.car.points.length) L.polyline(state.car.points, { color: COLORS.car, weight: sel === 'car' ? 6 : 4, opacity: sel === 'car' ? 1 : 0.3 }).addTo(mapLayer);
-    if (sel === 'car' && state.car && state.car.points) state.car.points.forEach(function (p) { bounds.push(p); });
+    if (state.car && state.car.points && state.car.points.length) L.polyline(state.car.points, { color: COLORS.car, weight: sel === 'car' ? 6 : 4, opacity: sel === 'car' ? 0.9 : 0.3 }).addTo(mapLayer);
+    if (sel === 'car' && state.car && state.car.points) state.car.points.forEach(function (p) { all.push(p); });
     var selTrip = list.filter(function (t) { return t.key === sel; })[0]; if (selTrip) drawTrip(selTrip, true);
-    L.marker([r.to.lat, r.to.lon], { title: r.to.label, icon: L.divIcon({ className: '', html: '<div class="dest-pin"></div>', iconSize: [22, 22], iconAnchor: [11, 11] }) }).addTo(mapLayer); bounds.push([r.to.lat, r.to.lon]);
-    if (bounds.length > 1) map.fitBounds(bounds, { paddingTopLeft: [24, 24], paddingBottomRight: [24, Math.round(window.innerHeight * 0.42)] });
+    L.marker([r.from.lat, r.from.lon], { title: r.from.label, icon: L.divIcon({ className: '', html: '<div class="start-pin"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) }).addTo(mapLayer);
+    L.marker([r.to.lat, r.to.lon], { title: r.to.label, icon: L.divIcon({ className: '', html: '<div class="dest-pin"></div>', iconSize: [22, 22], iconAnchor: [11, 11] }) }).addTo(mapLayer);
+    all.push([r.from.lat, r.from.lon], [r.to.lat, r.to.lon]);
 
-    var h = '';
+    var h = '<a class="gmaps" href="' + esc(gmapsUrl(selTrip, r, sel === 'car')) + '" target="_blank" rel="noopener">Ouvrir dans Google Maps ↗</a>';
     list.forEach(function (t) {
       var color = COLORS[(t.veh[t.veh.length - 1] || {}).type] || COLORS.train;
       h += '<button type="button" class="alt' + (t.key === sel ? ' selected' : '') + '" data-mapkey="' + esc(t.key) + '" aria-pressed="' + (t.key === sel) + '"><span class="swatch" style="background:' + color + '"></span><span class="alt-main" style="flex:1"><span class="alt-title">' + esc(tripTitle(t)) + '</span>' + legsHtml(t, false) + '</span><span class="alt-time"><b>' + hm(t.arrive) + '</b><span class="dur">' + durTxt(t.duration) + '</span><span>' + (t === r.best ? 'meilleur' : deltaTxt(mins(t.arrive - r.best.arrive))) + '</span></span></button>';
@@ -626,6 +658,16 @@
       h += '<button type="button" class="alt' + (sel === 'car' ? ' selected' : '') + '" data-mapkey="car" aria-pressed="' + (sel === 'car') + '"><span class="swatch" style="background:' + COLORS.car + '"></span><span class="alt-main" style="flex:1"><span class="alt-title">Voiture</span><span class="alt-sub">' + Math.round(state.car.delay / 60) + ' min de bouchons · trafic ' + ago(state.car.fetchedAt) + '</span></span><span class="alt-time"><b>' + hm(ca) + '</b><span>' + deltaTxt(mins(ca - r.best.arrive)) + '</span></span></button>';
     }
     sheet.innerHTML = h;
+    var selEl = sheet.querySelector('.alt.selected'); if (selEl) sheet.scrollTop = selEl.offsetTop - sheet.offsetTop - 44;
+
+    var z = mapZoom, pts = z === 'start' ? start : z === 'end' ? end : all;
+    if (sel === 'car' || pts.length < 2) { z = 'all'; pts = all; }
+    tools.querySelectorAll('[data-zoom]').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.zoom === z); b.disabled = sel === 'car' && b.dataset.zoom !== 'all'; });
+    var bottom = sheet.offsetHeight + 24;
+    setTimeout(function () {
+      map.invalidateSize();
+      map.fitBounds(pts, { paddingTopLeft: [24, 72], paddingBottomRight: [56, bottom], maxZoom: z === 'all' ? 15 : 17 });
+    }, 60);
   }
 
   // ---------------------------------------------------------------- quand partir
@@ -775,6 +817,11 @@
       state.selectedKey = b.dataset.pick; state.showDetail = true; closeSheet('#rejected-sheet'); render(); toast('Trajet choisi.');
     });
     $('#map-sheet').addEventListener('click', function (e) { var b = e.target.closest('[data-mapkey]'); if (!b) return; mapSel = b.dataset.mapkey; if (mapSel !== 'car') state.selectedKey = mapSel; renderMap(); });
+    $('#map-tools').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-zoom]'), st = e.target.closest('[data-style]');
+      if (b) { mapZoom = b.dataset.zoom; renderMap(); }
+      if (st) { state.settings.mapStyle = state.settings.mapStyle === 'swiss' ? 'plan' : 'swiss'; store.set('settings', state.settings); st.textContent = state.settings.mapStyle === 'swiss' ? 'Plan' : 'Swisstopo'; setTiles(); }
+    });
 
     $$('[data-dep]').forEach(function (b) { b.addEventListener('click', function () {
       if (b.dataset.dep === 'now') { setDepart(null); return; }

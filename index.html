@@ -66,6 +66,14 @@
     <!-- ÉCRAN CARTE -->
     <section id="screen-map" class="screen" data-title="Carte" hidden>
       <div id="map" role="region" aria-label="Carte des trajets"></div>
+      <div class="map-tools" id="map-tools" hidden>
+        <div class="map-zoom" role="group" aria-label="Zoom">
+          <button type="button" data-zoom="all" aria-pressed="true">Tout</button>
+          <button type="button" data-zoom="start" aria-pressed="false">Départ</button>
+          <button type="button" data-zoom="end" aria-pressed="false">Arrivée</button>
+        </div>
+        <button type="button" class="map-style" data-style>Swisstopo</button>
+      </div>
       <div class="map-sheet" id="map-sheet"></div>
     </section>
 
