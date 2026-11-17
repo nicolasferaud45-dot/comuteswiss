@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2348C9">
+<meta name="description" content="Le meilleur trajet en transports publics en Suisse, en temps réel.">
+<title>Trajet</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <h1 id="screen-title">Trajet</h1>
+    <button type="button" id="fresh-pill" class="pill pill-good" aria-live="polite">
+      <span class="dot"></span><span id="fresh-text">—</span>
+    </button>
+  </header>
+
+  <div id="demo-banner" class="banner" hidden>
+    Données de démonstration : le réseau n'est pas joignable d'ici. Installée sur le téléphone, l'appli utilise les vraies données.
+  </div>
+
+  <main id="screens">
+
+    <!-- ÉCRAN TRAJET -->
+    <section id="screen-trip" class="screen" data-title="Trajet">
+      <div class="od-card">
+        <button type="button" class="od-row" id="from-btn">
+          <span class="od-icon od-from" aria-hidden="true"></span>
+          <span class="od-text"><span class="od-label">Départ</span><span class="od-value" id="from-label">Ma position</span><span class="od-sub" id="from-sub"></span></span>
+        </button>
+        <button type="button" class="od-row" id="to-btn">
+          <span class="od-icon od-to" aria-hidden="true"></span>
+          <span class="od-text"><span class="od-label">Arrivée</span><span class="od-value" id="to-label">Choisir une destination</span></span>
+        </button>
+        <button type="button" class="swap" id="swap-btn" aria-label="Inverser départ et arrivée">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg>
+        </button>
+      </div>
+
+      <div class="card depart-card">
+        <div class="row-between">
+          <span class="strong">Départ</span>
+          <div class="segmented seg2" role="group" aria-label="Heure de départ">
+            <button type="button" data-dep="now" aria-pressed="true">Maintenant</button>
+            <button type="button" data-dep="later" aria-pressed="false">Autre heure</button>
+          </div>
+        </div>
+        <div class="row-between" id="depart-pick" hidden>
+          <label for="depart-time" class="muted small">Simuler un départ le</label>
+          <input type="datetime-local" id="depart-time" class="time-input wide" step="300">
+        </div>
+      </div>
+
+      <div class="fav-row" id="fav-row" role="list" aria-label="Trajets favoris"></div>
+
+      <div id="trip-results" aria-live="polite"></div>
+    </section>
+
+    <!-- ÉCRAN CARTE -->
+    <section id="screen-map" class="screen" data-title="Carte" hidden>
+      <div id="map" role="region" aria-label="Carte des trajets"></div>
+      <div class="map-sheet" id="map-sheet"></div>
+    </section>
+
+    <!-- ÉCRAN QUAND PARTIR -->
+    <section id="screen-when" class="screen" data-title="Quand partir ?" hidden>
+      <p class="muted" id="when-od"></p>
+      <div class="card row-between">
+        <label for="when-limit" class="strong">Arriver avant</label>
+        <input type="time" id="when-limit" class="time-input" step="300">
+      </div>
+      <div class="segmented" role="group" aria-label="Critère">
+        <button type="button" data-mode="late" aria-pressed="true">Le plus tard</button>
+        <button type="button" data-mode="short" aria-pressed="false">Le plus court</button>
+        <button type="button" data-mode="calm" aria-pressed="false">Le moins chargé</button>
+      </div>
+      <button type="button" class="btn btn-primary" id="when-go">Comparer les départs</button>
+      <div id="when-results" aria-live="polite"></div>
+    </section>
+
+    <!-- ÉCRAN RÉGLAGES -->
+    <section id="screen-settings" class="screen" data-title="Réglages" hidden>
+      <h2 class="section-title">Mes trajets favoris</h2>
+      <div id="fav-list"></div>
+
+      <h2 class="section-title">Préférences</h2>
+      <div class="card stack">
+        <div class="row-between">
+          <span><span class="strong">Marche acceptée</span><br><span class="muted small">Pour rejoindre un autre arrêt ou une autre ligne</span></span>
+          <span class="stepper"><button type="button" data-step="walkMax" data-delta="-1" aria-label="Moins de marche">−</button><output id="walkMax-out"></output><button type="button" data-step="walkMax" data-delta="1" aria-label="Plus de marche">+</button></span>
+        </div>
+        <div class="row-between">
+          <span><span class="strong">Vitesse de marche</span></span>
+          <select id="walkSpeed" class="select">
+            <option value="65">Tranquille</option>
+            <option value="80">Normale</option>
+            <option value="95">Rapide</option>
+          </select>
+        </div>
+        <div class="row-between">
+          <span><span class="strong">Correspondance minimale</span><br><span class="muted small">En dessous, le trajet est jugé risqué</span></span>
+          <span class="stepper"><button type="button" data-step="minTransfer" data-delta="-1" aria-label="Moins">−</button><output id="minTransfer-out"></output><button type="button" data-step="minTransfer" data-delta="1" aria-label="Plus">+</button></span>
+        </div>
+      </div>
+
+      <h2 class="section-title">Comparaison voiture</h2>
+      <div class="card stack">
+        <label for="tomtomKey"><span class="strong">Clé TomTom (gratuite)</span><br><span class="muted small">Pour le trafic en direct. Créez-la sur developer.tomtom.com, puis collez-la ici.</span></label>
+        <input id="tomtomKey" class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="Coller la clé ici">
+        <div class="row-between">
+          <span><span class="strong">Temps pour se garer</span><br><span class="muted small">Estimation, non fournie par le trafic</span></span>
+          <span class="stepper"><button type="button" data-step="parking" data-delta="-1" aria-label="Moins">−</button><output id="parking-out"></output><button type="button" data-step="parking" data-delta="1" aria-label="Plus">+</button></span>
+        </div>
+      </div>
+
+      <h2 class="section-title">Sources des données</h2>
+      <p class="muted small">Horaires et retards : transport.opendata.ch · Adresses et cartes : swisstopo (geo.admin.ch) · Trafic : TomTom. Les données restent sur ce téléphone.</p>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Navigation principale">
+    <button type="button" data-tab="trip" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Trajet</span></button>
+    <button type="button" data-tab="map">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Carte</span></button>
+    <button type="button" data-tab="when">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/></svg><span>Quand partir</span></button>
+    <button type="button" data-tab="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span>Réglages</span></button>
+  </nav>
+
+  <!-- FEUILLE RECHERCHE -->
+  <div class="sheet" id="search-sheet" role="dialog" aria-modal="true" aria-labelledby="search-title" hidden>
+    <div class="sheet-head">
+      <button type="button" class="icon-btn" id="search-close" aria-label="Fermer">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <h2 id="search-title">Départ</h2>
+    </div>
+    <label class="search-field">
+      <span class="sr-only">Adresse, arrêt ou lieu</span>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="search-input" type="search" enterkeyhint="search" autocomplete="off" placeholder="Adresse, arrêt ou lieu en Suisse">
+    </label>
+    <ul class="result-list" id="search-results"></ul>
+  </div>
+
+  <!-- FEUILLE ÉCARTÉS -->
+  <div class="sheet" id="rejected-sheet" role="dialog" aria-modal="true" aria-labelledby="rejected-title" hidden>
+    <div class="sheet-head">
+      <button type="button" class="icon-btn" id="rejected-close" aria-label="Fermer">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <h2 id="rejected-title">Trajets testés</h2>
+    </div>
+    <div id="rejected-body" class="sheet-body"></div>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
