@@ -250,13 +250,27 @@
       t.score = t.arrive / 60000 + t.penalty;
     });
     var live = trips.filter(function (t) { return !t.dead; }).sort(function (a, b) { return a.score - b.score || b.leave - a.leave; });
-    var best = live[0] || null, proposed = [], rejected = [], sigs = {};
+    var best = live[0] || null, proposed = [], rejected = [], rides = {}, uniq = [], routes = {};
+    // 1) Même train/bus/métro au même horaire = même trajet, quel que soit l'arrêt de départ
     live.forEach(function (t) {
-      if (proposed.length < 4 && !sigs[t.sig]) { proposed.push(t); sigs[t.sig] = t; return; }
-      if (sigs[t.sig]) t.why = 'Même trajet, départ plus tard';
-      else t.why = t.reasons[0] || ('Arrive ' + Math.max(1, mins(t.arrive - best.arrive)) + ' min plus tard');
+      var ride = t.veh.map(function (l) { return l.label + '@' + (l.depPlan || l.dep); }).join('|');
+      if (rides[ride]) { t.why = 'Même trajet que « ' + tripTitle(rides[ride]) + ' »'; rejected.push(t); return; }
+      rides[ride] = t; uniq.push(t);
+    });
+    // 2) D'abord des parcours vraiment différents (autres lignes ou autre correspondance)
+    uniq.forEach(function (t) {
+      var route = t.veh.map(function (l) { return l.label + '>' + (l.toName || ''); }).join('|');
+      t.route = route;
+      if (proposed.length < 4 && !routes[route]) { routes[route] = 1; proposed.push(t); }
+    });
+    // 3) Puis les départs suivants, s'il reste de la place
+    uniq.forEach(function (t) {
+      if (proposed.indexOf(t) >= 0) return;
+      if (proposed.length < 4) { t.next = true; proposed.push(t); return; }
+      t.why = t.reasons[0] || ('Arrive ' + Math.max(1, mins(t.arrive - best.arrive)) + ' min plus tard');
       rejected.push(t);
     });
+    proposed.sort(function (a, b) { return a.score - b.score || b.leave - a.leave; });
     trips.filter(function (t) { return t.dead; }).forEach(function (t) { t.why = t.dead; rejected.push(t); });
     return { best: best, proposed: proposed, rejected: rejected, tested: trips.length };
   }
@@ -301,7 +315,7 @@
     var id = ++running;
     state.loading = !state.result || opts.full; state.error = null;
     if (opts.full) state.selectedKey = null;
-    render();
+    if (!opts.silent) render();
     Promise.all([resolvePlace(state.from), resolvePlace(state.to)]).then(function (pl) {
       var from = pl[0], to = pl[1];
       return gather(from, to, baseTime(), false, 4, 3, 4).then(function (g) {
@@ -309,8 +323,9 @@
         var r = rank(g.trips);
         state.result = Object.assign(r, { fetchedAt: Date.now(), at: state.departAt, origins: g.origins, dests: g.dests, from: from, to: to, demo: state.demo });
         state.loading = false;
+        var y = $('#screens').scrollTop;
         if (state.selectedKey && !g.trips.some(function (t) { return t.key === state.selectedKey; })) state.selectedKey = null;
-        render();
+        render(); if (opts.silent) $('#screens').scrollTop = y;
         fetchCar(from, to).then(function (c) { if (id === running) { state.car = c; render(); } });
       });
     }).catch(function (e) {
@@ -437,11 +452,11 @@
     alts.forEach(function (t) {
       var d = mins(t.arrive - main.arrive);
       h += '<button type="button" class="card alt" data-key="' + esc(t.key) + '"><span class="alt-main"><span class="alt-title">' + esc(tripTitle(t)) + '</span>' + legsHtml(t, false) +
-        '<span class="alt-sub">Départ ' + hm(t.leave) + (t.reasons.length ? ' · ' + esc(t.reasons[0]) : '') + '</span></span>' +
+        '<span class="alt-sub">' + (t.next ? 'Même parcours, plus tard · ' : '') + 'Départ ' + hm(t.leave) + (t.reasons.length ? ' · ' + esc(t.reasons[0]) : '') + '</span></span>' +
         '<span class="alt-time"><b>' + hm(t.arrive) + '</b><span class="dur">' + durTxt(t.duration) + '</span><span>' + deltaTxt(d) + '</span></span></button>';
     });
     h += carHtml(main);
-    h += '<p class="muted small" style="text-align:center">Calculé à ' + hm(r.fetchedAt) + (state.departAt ? ' pour un départ simulé' : ' · mise à jour automatique chaque minute') + '</p>';
+    h += '<p class="muted small" style="text-align:center">Calculé à ' + hm(r.fetchedAt) + (state.departAt ? ' pour un départ simulé' : '') + ' · mise à jour automatique chaque minute' + '</p>';
     box.innerHTML = h;
     if (state.tab === 'map') renderMap();
   }
@@ -802,9 +817,9 @@
     $$('.tabbar button[data-tab="trip"]').forEach(function (b) { b.addEventListener('click', function () { if (!state.result && state.to) compute({ full: true }); }); });
 
     // Mises à jour : chaque minute, et au retour dans l'appli
-    setInterval(function () { if (document.visibilityState === 'visible' && state.to && state.tab !== 'settings' && !state.departAt) compute(); }, 60000);
+    setInterval(function () { if (document.visibilityState === 'visible' && state.to && state.tab !== 'settings') compute({ silent: true }); }, 60000);
     setInterval(function () { renderFresh(); if (state.result && state.tab === 'trip' && !document.querySelector('.sheet:not([hidden])')) { var y = $('#screens').scrollTop; render(); $('#screens').scrollTop = y; } }, 15000);
-    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && state.to && state.result && !state.departAt && Date.now() - state.result.fetchedAt > 45000) compute(); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && state.to && state.result && Date.now() - state.result.fetchedAt > 45000) compute(); });
   }
 
   // ---------------------------------------------------------------- démo hors ligne
